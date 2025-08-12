@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS Weather Monitoring Architecture Guide</title>
+    <link rel="stylesheet" href="hugo_style.css">
+</head>
+<body>
+    <header>
+        <h1>AWS Weather Monitoring Architecture Guide</h1>
+        <p>Step-by-step guide to building a serverless weather data pipeline and visualization system.</p>
+    </header>
+    <main>
+        <section id="introduction">
+            <h2>Introduction</h2>
+            <p>This guide will guide through the process of setting up a robust, scalable, and cost-effective weather monitoring and visualization system on Amazon Web Services (AWS). We will leverage various AWS serverless services to build a fully automated data pipeline from data collection to interactive dashboards.</p>
+        </section>
+
+        <section id="architecture-overview">
+            <h2>Overall Architecture</h2>
+            <p>Below is the high-level architecture diagram of the system:</p>
+            <img src="/image/architecture.png" alt="AWS Weather Monitoring Architecture Diagram">
+            <p>The system consists of several key AWS services working in harmony to collect, store, process, and visualize weather data.</p>
+        </section>
+
+        <section id="steps">
+            <h2>Step-by-Step Implementation</h2>
+            <!-- Content for each step will be here -->
+        </section>
+
+            <h3>Step 1: AWS Account Setup and IAM Configuration</h3>
+            <p>Before beginning, ensure you have an active AWS account. The first crucial step is to configure Identity and Access Management (IAM) roles and policies to grant necessary permissions to your AWS services while adhering to the principle of least privilege.</p>
+            <ul>
+                <li>Create specific IAM Roles for your Lambda function, DynamoDB, and S3. These roles shng Architecture Diagrould only have the permissions required for their specific tasks (e.g., Lambda needs permissions to write to DynamoDB and S3, and to create CloudWatch logs).</li>
+                <li><img src="/image/rule_eventbridge.png" alt="Event Bridge rule"></li>
+                <li><img src="/image/rule_quicksight.png" alt="QuickSight rule"></li>
+                <li><img src="/image/rule_lambda.png" alt="Lambda rule"></li>
+                <li>**Best Practice:** Always apply the Principle of Least Privilege.</li>
+            </ul>
+
+
+
+
+            <h3>Step 2: Set up DynamoDB and S3 for Data Storage</h3>
+            <p>Your weather data will be stored in two primary AWS services, each serving a distinct purpose:</p>
+            <h4>Amazon DynamoDB (WeatherData Table)</h4>
+            <ul>
+                <li>Create a DynamoDB table named <code>WeatherData</code>.</li>
+                <li><img src="/image/create_dynamotable.png" alt="DynamoDB WeatherData table"></li>
+                <li>Configure the primary key: <code>location</code> (Partition Key, String) and <code>timestamp</code> (Sort Key, String). This allows efficient querying of weather data by location and time.</li>
+                <li><img src="/image/dynamoitem.png" alt="DynamoDB WeatherData table items"></li>
+                <li>Ensure encryption at rest is enabled (DynamoDB encrypts data by default).</li>
+                <li>DynamoDB will store near real-time weather data for quick access by your React dashboard.</li>
+            </ul>
+            <h4>Amazon S3 (weather-data-bucket)</h4>
+            <ul>
+                <li>Create an S3 bucket, for example, <code>weather-data-bucket-saigon</code> (bucket names must be globally unique).</li>
+                <li><img src="/image/s3bucket.png" alt="S3 bucket"></li>
+                <li>This bucket will store raw and processed weather data as JSON or CSV files. It acts as a data lake for historical analysis and as the primary data source for AWS QuickSight.</li>
+                <li><img src="/image/json_in_s3.png" alt="json files that are from DynamoDB"></li>
+                <li>We could also set up lifecycle policies to manage data storage costs (e.g., moving older data to S3 Glacier).</li>
+            </ul>
+
+
+
+
+            <h3>Step 3: Implement Lambda Function and EventBridge for Data Collection</h3>
+            <p>This step involves setting up the core automation for collecting weather data.</p>
+            <h4>AWS Lambda (WeatherDataCollector)</h4>
+            <ul>
+                <li>Write a Python Lambda function (e.g., <code>lambda_weather_collector_s3.py</code>) that:</li>
+                <ul>
+                    <li>Calls the Open-Meteo API to retrieve weather data.</li>
+                    <li>Parses the JSON response.</li>
+                    <li>Stores the processed data in your DynamoDB <code>WeatherData</code> table.</li>
+                    <li>Stores the raw or processed data as JSON/CSV files in your S3 <code>weather-data-bucket</code>.</li>
+                    <li><pre>import json
+import boto3
+from datetime import datetime
+from urllib import request, parse
+from decimal import Decimal
+import logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('WeatherData')
+
+s3 = boto3.client('s3')
+bucket_name = 'weather-data-bucket-saigon'
+
+# Custom JSON encoder
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super(DecimalEncoder, self).default(obj)
+
+def lambda_handler(event, context):
+    try:
+        latitude = 10.7769
+        longitude = 106.7009
+
+        api_url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            'latitude': latitude,
+            'longitude': longitude,
+            'current': 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,weather_code',
+            'timezone': 'Asia/Bangkok',
+            'forecast_days': 1
+        }
+
+        query_string = parse.urlencode(params)
+        full_url = f"{api_url}?{query_string}"
+
+        logger.info(f"Calling Open-Meteo API for coordinates: {latitude}, {longitude}")
+        with request.urlopen(full_url, timeout=10) as resp:
+            weather_data = json.loads(resp.read().decode())
+
+        current_data = weather_data.get('current')
+        if not current_data:
+            raise ValueError("No 'current' data returned from API")
+
+        def to_decimal(val):
+            return Decimal(str(val)) if val is not None else None
+
+        timestamp = datetime.utcnow().isoformat()
+
+        item = {
+            'location': f"{latitude},{longitude}",
+            'timestamp': timestamp,
+            'current_temperature': to_decimal(current_data.get('temperature_2m')),
+            'current_humidity': to_decimal(current_data.get('relative_humidity_2m')),
+            'current_wind_speed': to_decimal(current_data.get('wind_speed_10m')),
+            'current_wind_direction': to_decimal(current_data.get('wind_direction_10m')),
+            'weather_code': int(current_data.get('weather_code')) if current_data.get('weather_code') is not None else None,
+            'data_source': 'open-meteo'
+        }
+
+        logger.info(f"Saving weather data to DynamoDB: {item}")
+        table.put_item(Item=item)
+
+        # 🔥 Save to S3
+        s3_key = f"weather-data/{timestamp}.json"
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=s3_key,
+            Body=json.dumps(item, cls=DecimalEncoder),
+            ContentType='application/json'
+        )
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Weather data collected successfully',
+                'timestamp': timestamp,
+                'temperature': item['current_temperature'],
+                'humidity': item['current_humidity'],
+                'wind_speed': item['current_wind_speed']
+            }, cls=DecimalEncoder)
+        }
+
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'error': str(e)
+            })
+        }</pre></li>
+                </ul>
+                <li>Ensure your Lambda function's execution role has the necessary IAM permissions to interact with Open-Meteo API (via internet access), DynamoDB, S3, and CloudWatch Logs.</li>
+            </ul>
+            <h4>Amazon EventBridge (Scheduled Rule)</h4>
+            <ul>
+                <li>Create an EventBridge rule (formerly CloudWatch Events).</li>
+                <li><img src="/image/eventschedule.png" alt="the schedule named WeatherDataCollectionSchedule"></li>
+                <li>Configure this rule to trigger your <code>WeatherDataCollector</code> Lambda function on a defined schedule (e.g., every 5 minutes, hourly, daily). This ensures automated and periodic data collection.</li>
+                <li><img src="/image/scheduletarget.png" alt="the schedule aims to Lambda"></li>
+            </ul>
+
+
+
+
+            <h3>Step 4: Set up AWS QuickSight for Visualization</h3>
+            <p>AWS QuickSight will be used to create powerful, interactive dashboards for analyzing your historical weather data.</p>
+            <ul>
+                <li>In the QuickSight console, create a new dataset.</li>
+                <li>Choose **S3** as your data source. Point it to your <code>weather-data-bucket</code> and ensure the IAM role QuickSight uses has permissions to read from this bucket.</li>
+                <li><img src="/image/newdataset.png" alt="creating new data set"></li>
+                <li>Configure the manifest file (if using JSON) or directly select your CSV files. In this case, paste the URL of the manifest file stored in S3. The manisfest file is as below:</li>
+                <li><img src="/image/manifestlocation.png" alt="a new manifest file in s3"></li>
+                <li><pre>{
+  "fileLocations": [
+    {
+      "URIPrefixes": [
+        "s3://weather-data-bucket-saigon/weather-data/"
+      ]
+    }
+  ],
+  "globalUploadSettings": {
+    "format": "JSON",
+        "delimiter": ",",
+        "textqualifier": "\"",
+        "containsHeader": "false"
+    }
+}</pre></li>
+                <li>Design your dashboard: add visuals like line charts for temperature trends, bar charts for humidity, and tables for detailed data.</li>
+                <li>For example, the table:</li>
+                <li><img src="/image/tableinanalysis.png" alt="a table view in analysis"></li>
+                <li>We can also set the prediction to forecast the upcomming statistics:</li>
+                <li><img src="/image/publish.png" alt="publishing configure"></li>
+                <li>Crucially, set up **Scheduled Refresh** for your QuickSight dataset (e.g., hourly) to ensure your dashboards always display the latest data from S3. You could do this in the dataset section</li>
+                <li><img src="/image/refreshdataset.png" alt="schedule refresh in dataset"></li>
+                <li>Publish your dashboard and enable embedding if you plan to integrate it into your React web application.</li>
+                <li><img src="/image/editforecast.png" alt="add forecast features to the analysis"></li>
+                <li>And the final view should be in the dashboard:</li>
+                <li><img src="/image/dashboard.png" alt="final view of the dashboard"></li>
+            </ul>
+
+
+
+
+            <h3>Step 5: Implement Monitoring and Security</h3>
+            <p>Robust monitoring and security are paramount for any production-ready AWS solution.</p>
+            <h4>Amazon CloudWatch (Logs, Metrics, Alarms, Dashboards)</h4>
+            <ul>
+                <li>**Logs:** Ensure all your Lambda functions and other services log their activities to CloudWatch Logs. Configure appropriate retention policies.</li>
+                <li>**Metrics:** Monitor key metrics for your services (e.g., Lambda invocations, errors, duration; DynamoDB throttled requests, consumed capacity).</li>
+                <li>**Alarms:** Set up CloudWatch Alarms to notify you of critical issues. For example, an alarm for Lambda errors &gt; 0 or DynamoDB throttled requests &gt; 0.</li>
+                <li>**Dashboards:** Create custom CloudWatch Dashboards to visualize the health and performance of your entire system at a glance.</li>
+            </ul>
+            <h4>Amazon SNS (Simple Notification Service)</h4>
+            <ul>
+                <li>Integrate SNS with CloudWatch Alarms to send notifications (e.g., email, SMS) when an alarm state is triggered.</li>
+            </ul>
+            <h4>AWS IAM (Identity and Access Management)</h4>
+            <ul>
+                <li>Continuously review and refine your IAM policies to ensure the Principle of Least Privilege is strictly followed.</li>
+                <li>Consider using AWS Secrets Manager or AWS Systems Manager Parameter Store for managing sensitive information like API keys, rather than hardcoding them.</li>
+                <li>Ensure data is encrypted at rest (DynamoDB, S3) and in transit (HTTPS/SSL/TLS for all communication).</li>
+            </ul>
+    </main>
+    <footer>
+        <p>&copy; 2025 AWS Weather Monitoring Project. All rights reserved.</p>
+    </footer>
+    <script></script>
+</body>
+</html>
+
